@@ -141,7 +141,7 @@ This null model approach suggests that, in line with the above regression result
 
 The balls-in-urn case has an extension in probability called biased urns, where the probability of selecting balls of a certain color is biased rather than simply a function of relative frequency. A good introduction to this scenario is [here](https://en.wikipedia.org/wiki/Noncentral_hypergeometric_distributions). The scenario can be complicated by the manner in which balls are chosen, but if used on a dataset already collected, where the richness of both groups (m+n) is observed, the bias can be modeled by the parameter psi, which is simply the odds ratio of selecting one group versus another. (A simple description is on p. 50 of the [JAGS manual](https://people.stat.sc.edu/hansont/stat740/jags_user_manual.pdf) ).
 
-What makes the biased urn model useful in the case of modeling the relationship of native and nonnative species is that psi itself can be modeled, for example as a function of native richness. _In other words, we can ask whether the relative probability of selecting a nonnative species increases or decreases with native richness, above and beyond that expected from unbiased sampling._ Here is a simple example using JAGS in R, which includes the noncentral hypergeometric distribution (dyper):
+What makes the biased urn model useful in the case of modeling the relationship of native and nonnative species is that psi itself can be modeled, for example as a function of native richness. _In other words, we can ask whether the relative probability of selecting a nonnative species increases or decreases with native richness, above and beyond that expected from unbiased sampling._ Here is a simple example using JAGS in R, which includes the noncentral hypergeometric distribution ('dhyper'):
 
 ```{r message=F}
 #fit hypergeometric model in JAGS
@@ -183,17 +183,18 @@ attach.jags(jags.mod1)
 hist(b1)
 ```
 
-The slope parameter for the effect of native richness on psi is b1; this indicates there is very strong evidence that native and nonnative richness are positively related, beyond what would be expected by random sampling. Using this framework one could easily add in additional predictors of psi, as well as random effects. It would be interesting to see how this changes, for example, with plot size, ecoregion, etc.
+The slope parameter for the effect of native richness on psi is b1; this indicates there is strong evidence that native and nonnative richness are positively related, beyond what would be expected by random sampling. Using this framework one could easily add in additional predictors of psi, as well as random effects. It would be interesting to see how this changes, for example, with plot size, ecoregion, etc.
 
 However, to ensure the value of this approach, we have to be sure that artifacts are not present. We can do this by randomly shuffling the native status of each species.
 
 ### Protecting against statistical bias: shuffling nativity labels
 
-There are many ways to randomly permute community matrices to explore species co-occurrence patterns, and there are loads of papers that show how different types of randomization can influence the result. However, one easy way to break the link between "native" and "nonnative" interactions is to randomly shuffle which species are native and which are nonnative, leaving all other community attributes (like plot richness) the same. 
+There are many ways to randomly permute community matrices to explore species co-occurrence patterns, and there are loads of papers that show how different types of randomization can influence the result. For example, one easy way to break the link between "native" and "nonnative" interactions is to randomly shuffle which species are native and which are nonnative, leaving all other community attributes (like plot richness) the same. 
 
-Here is a version of the above dataset that calculates native and nonnative richness in each plot after shuffling the native status column. (Note the species pool sizes are slightly different than the above, because there is a third "NI" group that is randomly shuffled also but subsequently ignored.)
+Here is a version of the above dataset that calculates native and nonnative richness in each plot after shuffling the native status of each species separately in the 'taxa' dataset.
 
 ```{r}
+set.seed(500)
 taxa$NativeStatusShuffle = sample(taxa$NativeStatus,replace=F) #shuffle first in species db
 dat3 = merge(dat,taxa,all.x=T,all.y=F) #then add to plot db
 dat3 = dat3[dat3$PlotArea.m2==1000,] #and again limit to 1000 m size
@@ -242,7 +243,7 @@ points(k-exp025,exp025/k,pch=19,col="red",type="l",lwd=3)
 points(k-exp975,exp975/k,pch=19,col="red",type="l",lwd=3)  
 ```
 
-This shows that the hypergeometric model is indeed an appropriate null model. The last step is to confirm no bias in values of psi using this randomized dataset:
+This looks more reasonable. The last step is to confirm no bias in values of psi using this randomized dataset:
 
 ```{r}
 #fit hypergeometric model in JAGS
@@ -284,13 +285,98 @@ attach.jags(jags.mod1)
 hist(b1); abline(v=0,col="red")
 ```
 
-Although it varies based on the random seed of the random shuffling, generally b1 overlaps zero, suggesting the hypergeometric approach is a sound null model for native-nonnative richness data. We should probably confirm using many more shuffling permutations.
+Interestingly, b1 is almost aways NEGATIVE in this case, just like the above binomial regression. This suggests that, EVEN AT RANDOM, plots that have many species (of any kind) are less likely to accept a new species (of any kind). I suppose this could be due to competition or habitat qualities limiting the number of overall species in a plot, and it would be interesting to see whether this negative bias is accentuated in very small plots (similar to results of Fridley et al. 2004 Ecology).
+
+Of course, this is not the only way to randomize native-nonnative labels. Another way is to shuffle labels AFTER species belong to plots, by sampling without replacement the NativeStatus column in the final dataset. This means that plot richness stays the same, as does the overall frequency of N and I in the dataset.
+
+```{r}
+#shuffle without replacement entire NativeStatus column: ie, any individual can be N or I (and varies within sp)
+dat2$NativeStatusShuffle = sample(dat2$NativeStatus,replace=F)
+#table(dat2$NativeStatus,dat2$NativeStatusShuffle)
+Snat = tapply(dat2$NativeStatusShuffle,dat2$Plot,function(x)length(x[x=="N"]))
+#hist(log(Snat))
+Sint = tapply(dat2$NativeStatusShuffle,dat2$Plot,function(x)length(x[x=="I"]))
+#hist(Sint,breaks=60)
+
+#again, create new dataset that includes logs
+df = data.frame(Snat,Sint,log.Snat=log(Snat),log.Sint=log(Sint),log.Snat1=log(Snat+1),log.Sint1=log(Sint+1))
+
+#number of native species in dat2
+n = length(unique(dat2$SpCode[dat2$NativeStatusShuffle=="N"]))
+n
+#number of nonnative species in dat2
+m = length(unique(dat2$SpCode[dat2$NativeStatusShuffle=="I"]))
+m
+```
+
+Again we can model the relationships:
+
+```{r}
+plot(df$Snat,df$Sint)
+abline(lsfit(df$Snat,df$Sint),col="blue")
+summary(lm(Sint~Snat,df))
+  #strongly positive
+
+mod1 = glm(cbind(Sint,Snat)~Snat,family="binomial",data=df)
+summary(mod1)
+  #NS
+
+mod2 = glm(cbind(Sint,Snat)~log.Snat1,family="binomial",data=df)
+summary(mod2)
+  #slight negative slope
+```
+
+And again we can model psi via JAGS:
+
+```{r}
+#fit hypergeometric model in JAGS
+library(R2jags)
+k = df$Snat + df$Sint
+Y = df$Sint
+X = (df$Snat-mean(df$Snat)) / (sd(df$Snat)) #scaled, if necessary (often is)
+N = length(X) #number of plots
+
+mod = "model { 
+
+  for(i in 1:N) { #loop over each plot
+  
+  #Stochastic (data) model 
+  Y[i] ~ dhyper(m,n,k[i],psi[i]) #m is nonnative pool, n is native pool, k is plot richness
+      #psi is modeled below based on plot attributes
+  
+  #Process model
+  log(psi[i]) <- mu[i] #log link; psi is similar to lambda in poisson
+  mu[i] <- b0 + b1*X[i] #single intercept, slope depends on native richness
+  
+  } # close observation loop
+
+  #Prior distributions
+  b0 ~ dnorm(0, 0.01)
+  b1 ~ dnorm(0, 0.01)
+
+}" #close model
+
+#write model
+write(mod, "model.txt")
+
+inits = function() list(b0=1,b1=0)
+param = c("b0","b1") 
+data = list(Y=Y,N=N,m=m,n=n,k=k,X=X) 
+jags.mod1 = jags(model="model.txt",data=data,inits=inits,param=param,n.iter=1000,n.chain=3,n.thin=3,n.burnin=200) 
+jags.mod1
+attach.jags(jags.mod1)
+hist(b1); abline(v=0,col="red")
+```
+
+Interestingly, the hypergeometrical model typically agrees with the binomial model, depending on the method of shuffling labels.
 
 ### Next steps?
 
 We may be able to use the above JAGS model to re-run Beaury et al.'s analysis, adding in plot size (ignored by Beaury?) and other covariates. So far, evidence suggests a positive relationship between native and nonnative richness, opposite of the conclusions of Beaury et al. and Delavaux et al.
 
-Note here is Beaury's mixed model version:
+However, it also seems the case that random shuffling of nativity labels can produce different relationships, including positive, negative, and NS, suggesting that the simple act of grouping species--regardless of how membership is assigned--creates patterns in the data. I think we can conclude that, based on current evidence, there is no sign of negative relationships in real data, and the strong possibility of positive relationships. But I would like confirmation of a legitimate null model in these studies that is specific to native and nonnative species, rather than just the act of creating species groups.
+
+Note here is Beaury's (flawed) mixed model version:
 
 ```{r}
 #library(glmmTMB) 
