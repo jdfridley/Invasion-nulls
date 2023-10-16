@@ -1,0 +1,301 @@
+---
+title: "Appropriate null models for testing relationships between native and nonnative species richness"
+author: "Jason Fridley"
+date: "10-16-23"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This document describes analysis of plant native and nonnative richness relationships using the Beaury et al. dataset (Ecology data paper). The focus is on inappropriate use of the binomial GLM, which also involves the Nature paper of Delavaux et al. 2023.
+
+### Load in dataset (North American plants, various sources)
+
+```{r warning=F}
+setwd("C:\\Users\\fridley\\OneDrive - Clemson University\\academic\\projects\\invasion_null_hyp\\impacts")
+
+#datasets
+spp = read.csv("SPCIS_plant_taxa.csv") #plot-spp dataset
+plots = read.csv("SPCIS_plots.csv") #plot characteristics dataset
+
+#plot-spp dataset
+#str(spp)
+#length(unique(spp$Plot)) #83,391 plots
+#length(unique(spp$AcceptedTaxonName)) #14,056 species
+#table(spp$RecordedStrata)
+#table(spp$NumberOfStrata)
+#according to the metadata, there should always be a name in the "Original.TaxonName" column, but this is not the case:
+#sum(is.na(spp$Original.TaxonName))
+#there are 43280 rows missing a species name. Investigate:
+datNA = spp[is.na(spp$Original.TaxonName),]
+#head(datNA,100)
+#they all seem to have cover values and are of various growth forms and durations
+#need to consult the compilers; will remove for now
+spp2 = spp[!is.na(spp$Original.TaxonName),]
+#dim(spp2)
+
+#species-level dataset
+#taxa = spp2[duplicated(spp$AcceptedTaxonName)==F,-1]
+taxa = unique(spp2[,c(3,4,6,7,8)])
+#str(taxa)
+#table(taxa$NativeStatus)
+#I     N    NI 
+#1239 11943   359  
+#table(taxa$Duration)
+#table(taxa$GrowthHabit)
+
+#plot-level dataset
+#str(plots)
+#length(unique(plots$Plot)) #same #plots as spp dataset
+#table(plots$Dataset)
+#table(plots$Year)
+#length(plots$Plot[duplicated(plots$Plot)]) #not many resamples
+
+#merge to single dataset
+dat = merge(spp2,plots,by.x=c("Plot","Year"),by.y=c("Plot","Year"))
+#str(dat)
+```
+
+### Examine empirical relationships (unshuffled dataset)
+
+Plot size in the Beaury dataset varies significantly, between 1 m2 and 10,000 m2, creating strongly skewed richness distributions. For simplicity, I limit the dataset to 1000 m2 plots (N=6190), and create a new data frame "df" that contains native and nonnative richness values for each plot (plus logged versions).
+
+```{r}
+#calculate total number of native and nonnative species per plot
+#limit to certain plot sizes (eg 1000 m2 and larger)
+dat2 = dat[dat$PlotArea.m2==1000,]
+Snat = tapply(dat2$NativeStatus,dat2$Plot,function(x)length(x[x=="N"]))
+hist(log(Snat))
+Sint = tapply(dat2$NativeStatus,dat2$Plot,function(x)length(x[x=="I"]))
+hist(log(Sint)) #note mode is zero
+
+#total pool of native species:
+n = length(unique(dat2$SpCode[dat2$NativeStatus=="N"]))
+  #4714
+#number of nonnative species in dat2
+m = length(unique(dat2$SpCode[dat2$NativeStatus=="I"]))
+  #360
+
+#create new dataset that includes logs
+df = data.frame(Snat,Sint,log.Snat=log(Snat),log.Sint=log(Sint),log.Snat1=log(Snat+1),log.Sint1=log(Sint+1))
+```
+
+Let's examine the empirical relationship and the OLS regression:
+
+```{r}
+plot(df$Snat,df$Sint)
+abline(lsfit(df$Snat,df$Sint),col="blue")
+summary(lm(Sint~Snat,df)) 
+```
+
+The relationship is strongly positive with a slope of 0.09. Beaury et al. (Ecology Letters) suggest an approach that accounts for differences in total richness across plots is a binomial GLM, where the response variable is the number of nonnative species as a proportion of total richness. Technically, they use log-transformed native richness as the predictor variable, so we can compare binomial GLMs using each:
+
+
+```{r}
+mod1 = glm(cbind(Sint,Snat)~Snat,family="binomial",data=df)
+summary(mod1)
+
+mod2 = glm(cbind(Sint,Snat)~log.Snat,family="binomial",data=df)
+summary(mod2)
+```
+
+In both cases, the effect of native richness remains significantly positive, with a particularly high Z value when native richness is log-transformed.
+
+### Hypergeometric distribution as an appropriate null model
+
+In probability, random selection of one of two groups of objects in a sample of k draws is likened to taking color balls from an urn. If selection is performed without replacement, the probability of observing a certain number of objects from each group is defined by the hypergeometric distribution. This distribution applies to the case of native and nonnative species richness because, by convention, once a species of either group is observed in a plot, further observations of that species do not influence the richness of that group. For example, if native species X is selected at random to occur in a plot, it is effectively removed from the list of native species that can be further observed as richness increases.
+
+R includes functions for the hypergeometric sampling distribution, based on the number of elements of each group and the number of elements selected. For example, the expected number (plus 2.5% and 97.5% quantiles) of non-native species in a plot of 50 species chosen at random (without replacement) from a species pool of 100 natives and 20 nonnatives is 8 (with 95% CI 4-12):
+
+```{r}
+m = 20 #nonnative species in pool
+n = 100 #native species in pool
+k = 50 #plot richness
+qhyper(.5,m,n,k) #.5 is 50th quantile
+qhyper(.025,m,n,k) #2.5th quantile
+qhyper(.975,m,n,k) #97.5th 50th quantile
+```
+
+We can use this distribution to show the expected richness relationship in the empirical data, under the assumption that species are chosen entirely at random from the species pool for every plot:
+
+```{r}
+n = 4714
+m = 360
+k=c(1:400)  #site richness (number of draws)
+exp50 = qhyper(.5,m,n,k) #mean number of expected aliens
+exp025 = qhyper(.025,m,n,k) #2.5% quantile of expected aliens
+exp975 = qhyper(.975,m,n,k) #97.5% quantile of expected aliens
+plot(df$Snat,df$Sint/(df$Snat+df$Sint),log="x")
+points(k-exp50,exp50/k,pch=19,col="green",type="l",lwd=3)  
+points(k-exp025,exp025/k,pch=19,col="red",type="l",lwd=3)  
+points(k-exp975,exp975/k,pch=19,col="red",type="l",lwd=3)  
+```
+
+This null model approach suggests that, in line with the above regression results, there are often more non-native species per plot than expected based on random species selection, but it is unclear whether native richness per se influences nonnative richness in a non-random way.
+
+### Biased urns and the noncentral hypergeometric distribution
+
+The balls-in-urn case has an extension in probability called biased urns, where the probability of selecting balls of a certain color is biased rather than simply a function of relative frequency. A good introduction to this scenario is [here](https://en.wikipedia.org/wiki/Noncentral_hypergeometric_distributions). The scenario can be complicated by the manner in which balls are chosen, but if used on a dataset already collected, where the richness of both groups (m+n) is observed, the bias can be modeled by the parameter psi, which is simply the odds ratio of selecting one group versus another. (A simple description is on p. 50 of the [JAGS manual](https://people.stat.sc.edu/hansont/stat740/jags_user_manual.pdf) ).
+
+What makes the biased urn model useful in the case of modeling the relationship of native and nonnative species is that psi itself can be modeled, for example as a function of native richness. _In other words, we can ask whether the relative probability of selecting a nonnative species increases or decreases with native richness, above and beyond that expected from unbiased sampling._ Here is a simple example using JAGS in R, which includes the noncentral hypergeometric distribution (dyper):
+
+```{r message=F}
+#fit hypergeometric model in JAGS
+library(R2jags)
+k = df$Snat + df$Sint
+Y = df$Sint
+X = (df$Snat-mean(df$Snat)) / (sd(df$Snat)) #scaled, if necessary (often is)
+N = length(X) #number of plots
+
+mod = "model { 
+
+  for(i in 1:N) { #loop over each plot
+  
+  #Stochastic (data) model 
+  Y[i] ~ dhyper(m,n,k[i],psi[i]) #m is nonnative pool, n is native pool, k is plot richness
+      #psi is modeled below based on plot attributes
+  
+  #Process model
+  log(psi[i]) <- mu[i] #log link; psi is similar to lambda in poisson
+  mu[i] <- b0 + b1*X[i] #single intercept, slope b1 depends on native richness
+  
+  } # close observation loop
+
+  #Prior distributions
+  b0 ~ dnorm(0, 0.01)
+  b1 ~ dnorm(0, 0.01)
+
+}" #close model
+
+#write model
+write(mod, "model.txt")
+
+inits = function() list(b0=1,b1=0)
+param = c("b0","b1") 
+data = list(Y=Y,N=N,m=m,n=n,k=k,X=X) 
+jags.mod1 = jags(model="model.txt",data=data,inits=inits,param=param,n.iter=1000,n.chain=3,n.thin=3,n.burnin=200) 
+jags.mod1
+attach.jags(jags.mod1)
+hist(b1)
+```
+
+The slope parameter for the effect of native richness on psi is b1; this indicates there is very strong evidence that native and nonnative richness are positively related, beyond what would be expected by random sampling. Using this framework one could easily add in additional predictors of psi, as well as random effects. It would be interesting to see how this changes, for example, with plot size, ecoregion, etc.
+
+However, to ensure the value of this approach, we have to be sure that artifacts are not present. We can do this by randomly shuffling the native status of each species.
+
+### Protecting against statistical bias: shuffling nativity labels
+
+There are many ways to randomly permute community matrices to explore species co-occurrence patterns, and there are loads of papers that show how different types of randomization can influence the result. However, one easy way to break the link between "native" and "nonnative" interactions is to randomly shuffle which species are native and which are nonnative, leaving all other community attributes (like plot richness) the same. 
+
+Here is a version of the above dataset that calculates native and nonnative richness in each plot after shuffling the native status column. (Note the species pool sizes are slightly different than the above, because there is a third "NI" group that is randomly shuffled also but subsequently ignored.)
+
+```{r}
+taxa$NativeStatusShuffle = sample(taxa$NativeStatus,replace=F) #shuffle first in species db
+dat3 = merge(dat,taxa,all.x=T,all.y=F) #then add to plot db
+dat3 = dat3[dat3$PlotArea.m2==1000,] #and again limit to 1000 m size
+
+Snat = tapply(dat3$NativeStatusShuffle,dat3$Plot,function(x)length(x[x=="N"]))
+#hist(log(Snat))
+Sint = tapply(dat3$NativeStatusShuffle,dat3$Plot,function(x)length(x[x=="I"]))
+#hist(Sint,breaks=60)
+
+#again, create new dataset that includes logs
+df = data.frame(Snat,Sint,log.Snat=log(Snat),log.Sint=log(Sint),log.Snat1=log(Snat+1),log.Sint1=log(Sint+1))
+
+#number of native species in dat2
+n = length(unique(dat3$SpCode[dat3$NativeStatusShuffle=="N"]))
+#number of nonnative species in dat2
+m = length(unique(dat3$SpCode[dat3$NativeStatusShuffle=="I"]))
+```
+
+As above, we can now examine various models of the native-nonnative richness relationship:
+
+```{r}
+plot(df$Snat,df$Sint)
+abline(lsfit(df$Snat,df$Sint),col="blue")
+summary(lm(Sint~Snat,df))
+  #strongly positive
+
+mod1 = glm(cbind(Sint,Snat)~Snat,family="binomial",data=df)
+summary(mod1)
+  #significantly negative, weak slope
+
+mod2 = glm(cbind(Sint,Snat)~log.Snat1,family="binomial",data=df)
+summary(mod2)
+  #strongly negative slope; note I had to add "1" to native richness before log because a few zero values
+```
+
+With species assigned nativity status at random, it is not surprising that, by chance, more species-rich plots include more native and nonnative species, with a strongly positive OLS regression. Interestingly, both binomial GLMs indicate a negative relationship for random data, suggesting this is not an appropriate model. We can now apply the hypergeometric null model assuming equal selection probability:
+
+```{r}
+k=c(1:400)  #site richness (number of draws)
+exp50 = qhyper(.5,m,n,k) #mean number of expected aliens
+exp025 = qhyper(.025,m,n,k) #2.5% quantile of expected aliens
+exp975 = qhyper(.975,m,n,k) #97.5% quantile of expected aliens
+plot(df$Snat,df$Sint/(df$Snat+df$Sint),log="x")
+points(k-exp50,exp50/k,pch=19,col="green",type="l",lwd=3)  
+points(k-exp025,exp025/k,pch=19,col="red",type="l",lwd=3)  
+points(k-exp975,exp975/k,pch=19,col="red",type="l",lwd=3)  
+```
+
+This shows that the hypergeometric model is indeed an appropriate null model. The last step is to confirm no bias in values of psi using this randomized dataset:
+
+```{r}
+#fit hypergeometric model in JAGS
+library(R2jags)
+k = df$Snat + df$Sint
+Y = df$Sint
+X = (df$Snat-mean(df$Snat)) / (sd(df$Snat)) #scaled, if necessary (often is)
+N = length(X) #number of plots
+
+mod = "model { 
+
+  for(i in 1:N) { #loop over each plot
+  
+  #Stochastic (data) model 
+  Y[i] ~ dhyper(m,n,k[i],psi[i]) #m is nonnative pool, n is native pool, k is plot richness
+      #psi is modeled below based on plot attributes
+  
+  #Process model
+  log(psi[i]) <- mu[i] #log link; psi is similar to lambda in poisson
+  mu[i] <- b0 + b1*X[i] #single intercept, slope depends on native richness
+  
+  } # close observation loop
+
+  #Prior distributions
+  b0 ~ dnorm(0, 0.01)
+  b1 ~ dnorm(0, 0.01)
+
+}" #close model
+
+#write model
+write(mod, "model.txt")
+
+inits = function() list(b0=1,b1=0)
+param = c("b0","b1") 
+data = list(Y=Y,N=N,m=m,n=n,k=k,X=X) 
+jags.mod1 = jags(model="model.txt",data=data,inits=inits,param=param,n.iter=1000,n.chain=3,n.thin=3,n.burnin=200) 
+jags.mod1
+attach.jags(jags.mod1)
+hist(b1); abline(v=0,col="red")
+```
+
+Although it varies based on the random seed of the random shuffling, generally b1 overlaps zero, suggesting the hypergeometric approach is a sound null model for native-nonnative richness data. We should probably confirm using many more shuffling permutations.
+
+### Next steps?
+
+We may be able to use the above JAGS model to re-run Beaury et al.'s analysis, adding in plot size (ignored by Beaury?) and other covariates. So far, evidence suggests a positive relationship between native and nonnative richness, opposite of the conclusions of Beaury et al. and Delavaux et al.
+
+Note here is Beaury's mixed model version:
+
+```{r}
+#library(glmmTMB) 
+#model <- glmmTMB(cbind(Non_richness, N_richness) ~ ln_N_richness_Z*(Ecoregion+Community) + ln_Dist_landcover_m_Z + HZ_Z +  (1|Park), ziformula = ~ln_N_richness_Z + Community + (1|ln_Dist_landcover_m_Z) + (1|HZ_Z) + (1|Ecoregion) + (1|Park), data=plots, family="binomial",control = glmmTMBControl(optCtrl=list(iter.max=1e3,eval.max=1e3), profile = TRUE))
+#summary(model)
+```
+
+
